@@ -9,6 +9,7 @@ import (
 
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/volume"
 	"github.com/docker/docker/client"
 	"golang.org/x/net/context"
 )
@@ -48,20 +49,32 @@ func (c *Command) Execute() (r *Result) {
 	started := time.Now()
 
 	var out io.ReadCloser
-	out, r.SystemError = c.cli.ContainerLogs(c.ctx, c.resp.ID, types.ContainerLogsOptions{ShowStdout: true})
+	out, r.SystemError = c.cli.ContainerLogs(c.ctx, c.resp.ID, types.ContainerLogsOptions{
+		ShowStdout: true,
+		ShowStderr: true,
+	})
 	if r.SystemError != nil {
 		return
 	}
 	go io.Copy(c.writer, out)
 	res, errch := c.cli.ContainerWait(c.ctx, c.resp.ID, container.WaitConditionNotRunning)
-	r.SystemError = <-errch
-	if r.SystemError != nil {
-		return
+	select {
+	case r.SystemError = <-errch:
+		if r.SystemError != nil {
+			return
+		} else {
+			panic("what the?")
+		}
+	case sc := <-res:
+		r.ExitCode = sc.StatusCode
 	}
 
-	r.ExitCode = (<-res).StatusCode
-
 	finished := time.Now()
+	c.cli.ContainerRemove(c.ctx, c.resp.ID, types.ContainerRemoveOptions{
+		RemoveVolumes: true,
+		RemoveLinks:   true,
+		Force:         true,
+	})
 	r.Duration = finished.Sub(started)
 	return
 }
@@ -99,6 +112,14 @@ func NewCommand(commandLine []string, workingDirectory string, env []string) (*C
 		return nil, err
 	}
 	defer cl.Close()
+	vol, err := c.cli.VolumeCreate(c.ctx, volume.VolumesCreateBody{
+		Driver:     "",
+		DriverOpts: map[string]string{},
+		Labels:     map[string]string{},
+	})
+	if err != nil {
+		return nil, err
+	}
 	c.resp, err = c.cli.ContainerCreate(
 		c.ctx,
 		&container.Config{
@@ -106,6 +127,7 @@ func NewCommand(commandLine []string, workingDirectory string, env []string) (*C
 			Cmd:        commandLine,
 			WorkingDir: workingDirectory,
 			Env:        env,
+			Volumes:    map[string]struct{}{vol.Name: struct{}{}},
 		},
 		nil,
 		nil,
